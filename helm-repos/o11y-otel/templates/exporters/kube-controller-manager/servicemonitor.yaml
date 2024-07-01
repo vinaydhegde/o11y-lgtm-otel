@@ -1,0 +1,50 @@
+{{- if and .Values.kubeControllerManager.enabled .Values.kubeControllerManager.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ template "o11y-otel.fullname" . }}-kube-controller-manager
+  namespace: {{ template "o11y-otel.namespace" . }}
+  labels:
+    app: {{ template "o11y-otel.name" . }}-kube-controller-manager
+  {{- with .Values.kubeControllerManager.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{ include "o11y-otel.labels" . | indent 4 }}
+spec:
+  jobLabel: jobLabel
+  selector:
+    matchLabels:
+      app: {{ template "o11y-otel.name" . }}-kube-controller-manager
+      release: {{ $.Release.Name | quote }}
+  namespaceSelector:
+    matchNames:
+      - "kube-system"
+  endpoints:
+  - port: http-metrics
+    {{- if .Values.kubeControllerManager.serviceMonitor.interval }}
+    interval: {{ .Values.kubeControllerManager.serviceMonitor.interval }}
+    {{- end }}
+    bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+    {{- if .Values.kubeControllerManager.serviceMonitor.proxyUrl }}
+    proxyUrl: {{ .Values.kubeControllerManager.serviceMonitor.proxyUrl}}
+    {{- end }}
+    {{- if eq (include "o11y-otel.kubeControllerManager.insecureScrape" (list . false true .Values.kubeControllerManager.serviceMonitor.https )) "true" }}
+    scheme: https
+    tlsConfig:
+      caFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      {{- if eq (include "o11y-otel.kubeControllerManager.insecureScrape" (list . nil true .Values.kubeControllerManager.serviceMonitor.insecureSkipVerify)) "true" }}
+      insecureSkipVerify: true
+      {{- end }}
+      {{- if .Values.kubeControllerManager.serviceMonitor.serverName }}
+      serverName: {{ .Values.kubeControllerManager.serviceMonitor.serverName }}
+      {{- end }}
+    {{- end }}
+{{- if .Values.kubeControllerManager.serviceMonitor.metricRelabelings }}
+    metricRelabelings:
+{{ tpl (toYaml .Values.kubeControllerManager.serviceMonitor.metricRelabelings | indent 4) . }}
+{{- end }}
+{{- if .Values.kubeControllerManager.serviceMonitor.relabelings }}
+    relabelings:
+{{ tpl (toYaml .Values.kubeControllerManager.serviceMonitor.relabelings | indent 4) . }}
+{{- end }}
+{{- end }}

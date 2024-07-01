@@ -1,0 +1,220 @@
+{{ $collectorList := (append (append (append .Values.collectors .Values.tracesCollector) .Values.metricsCollector) .Values.logsCollector)}}
+{{ range $_, $collector := $collectorList -}}
+{{ if $collector.enabled }}
+{{ $collectorName := (print $.Release.Name "-" $collector.name) }}
+apiVersion: opentelemetry.io/v1alpha1
+kind: OpenTelemetryCollector
+metadata:
+  name: "{{ $collectorName }}"
+  {{- with $collector.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4}}
+  {{- end }}
+  labels:
+    {{- include "o11y-otel.labels" $ | indent 4 }}
+spec:
+  #securityContext:
+    #privileged: true
+    #runAsUser: 0
+  mode: {{ $collector.mode }}
+  image: {{ $collector.image }}
+  replicas: {{ $collector.replicas | default 1 }}
+  {{- with $collector.hpa }}
+  {{- if .enabled }}
+  autoscaler:
+    minReplicas: {{ .minReplicas }}
+    maxReplicas: {{ .maxReplicas }}
+    targetMemoryUtilization: {{ .targetMemoryUtilization }}
+    {{- if .targetCPUUtilization }}
+    targetCPUUtilization: {{ .targetCPUUtilization }}
+    {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- with $collector.podAnnotations }}
+  podAnnotations:
+    {{- toYaml . | nindent 4}}
+  {{- end }}
+  ports:
+    - name: "metrics"
+      protocol: TCP
+      port: 8888
+{{- if $collector.targetallocator }}
+{{- if $collector.targetallocator.enabled }}
+  targetAllocator:
+    enabled: true
+    image: {{ $collector.targetallocator.image }}
+    replicas: {{ $collector.targetallocator.replicas }}
+    allocationStrategy: {{ $collector.targetallocator.allocationStrategy }}
+    {{- if $collector.targetallocator.resources }}
+    resources:
+      {{- toYaml $collector.targetallocator.resources | nindent 6 }}
+    {{- end }}
+    {{- if $collector.targetallocator.filterStrategy }}
+    filterStrategy: {{ $collector.targetallocator.filterStrategy }}
+    {{- end }}
+    {{- if $collector.targetallocator.prometheusCR.enabled }}
+    prometheusCR:
+      {{- with $collector.targetallocator.prometheusCR }}
+      {{- toYaml .  | nindent 6 }}
+      {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}
+  env:
+  {{- if $collector.env }}
+    {{- toYaml $collector.env | nindent 4}}
+  {{- end }}
+    - name: OTEL_K8S_NODE_NAME
+      valueFrom:
+        fieldRef:
+          fieldPath: spec.nodeName
+    - name: OTEL_K8S_NAMESPACE
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.namespace
+    - name: OTEL_K8S_POD_NAME
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.name
+    - name: OTEL_K8S_POD_UID
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: metadata.uid
+    - name: OTEL_K8S_POD_IP
+      valueFrom:
+        fieldRef:
+          apiVersion: v1
+          fieldPath: status.podIP
+    - name: OTEL_RESOURCE_ATTRIBUTES
+      value: "k8s.cluster.name={{ $collector.clusterName | default $.Values.clusterName }}"
+    {{- if and ($.Values.useGOMEMLIMIT) (((($collector.resources).limits).memory))  }}
+    - name: GOMEMLIMIT
+      value: {{ include "opentelemetry-collector.gomemlimit" $collector.resources.limits.memory | quote }}
+      {{- end }}
+  config: |
+    exporters:
+      {{- toYaml $collector.config.exporters | nindent 6 }}
+    extensions:
+      {{- toYaml $collector.config.extensions | nindent 6 }}
+    receivers:
+      {{- toYaml $collector.config.receivers | nindent 6 }}
+      prometheus:
+        config:
+          scrape_configs:
+          {{ if $collector.scrape_configs_file }}
+          {{ tpl ($.Files.Get $collector.scrape_configs_file) $ | nindent 10 }}
+          {{ end }}
+          {{- if (not (eq $collector.mode "statefulset")) }}
+          - job_name: otel-collector
+            scrape_interval: 5s
+            static_configs:
+            - labels:
+                collector_name: ${KUBE_POD_NAME}
+              targets:
+                - 0.0.0.0:8888
+          {{ end }}
+        {{- if $collector.targetallocator }}
+        {{- if $collector.targetallocator.enabled }}
+        target_allocator:
+          endpoint: http://{{ $collectorName }}-targetallocator:80
+          interval: 30s
+          collector_id: ${POD_NAME}
+          http_sd_config:
+            refresh_interval: 60s
+        {{ end }}
+        {{ end }}
+    processors:
+      {{- toYaml $collector.config.processors | nindent 6 }}
+    connectors:
+      {{- toYaml $collector.config.connectors | nindent 6 }}
+    service:
+      {{- toYaml $collector.config.service | nindent 6 }}
+  resources:
+    {{- toYaml $collector.resources | nindent 4 }}
+{{- if $collector.tolerations }}
+  tolerations:
+    {{- toYaml $collector.tolerations | nindent 4 }}
+{{- end }}
+{{- if $collector.volumes }}
+  volumes:
+    {{- toYaml $collector.volumes | nindent 4 }}
+{{ end }}
+{{- if $collector.volumeMounts }}
+  volumeMounts:
+    {{- toYaml $collector.volumeMounts | nindent 4 }}
+{{ end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: "{{ $collectorName }}"
+rules:
+- apiGroups: [""]
+  resources:
+  - namespaces
+  - nodes
+  - nodes/proxy
+  - nodes/metrics
+  - services
+  - endpoints
+  - pods
+  - events
+  - secrets
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["monitoring.coreos.com"]
+  resources:
+  - servicemonitors
+  - podmonitors
+  verbs: ["get", "list", "watch"]
+- apiGroups:
+  - extensions
+  resources:
+  - ingresses
+  verbs: ["get", "list", "watch"]
+- apiGroups:
+  - apps
+  resources:
+  - daemonsets
+  - deployments
+  - replicasets
+  - statefulsets
+  verbs: ["get", "list", "watch"]
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["discovery.k8s.io"]
+  resources:
+  - endpointslices
+  verbs: ["get", "list", "watch"]
+- nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+  verbs: ["get"]
+{{- if $collector.extraRbac }}
+{{ toYaml $collector.extraRbac }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: "{{ $collectorName }}"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: "{{ $collectorName }}"
+subjects:
+- kind: ServiceAccount
+  # quirk of the Operator
+  name: "{{ $collectorName }}-collector"
+  namespace: {{ $.Release.Namespace }}
+{{- if eq $collector.mode "statefulset" }}
+- kind: ServiceAccount
+  name: {{ $collectorName }}-targetallocator
+  namespace: {{ $.Release.Namespace }}
+{{- end }}
+---
+{{ end }}
+{{- end }}

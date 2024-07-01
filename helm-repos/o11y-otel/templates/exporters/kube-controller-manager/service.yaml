@@ -1,0 +1,29 @@
+{{- if and .Values.kubeControllerManager.enabled .Values.kubeControllerManager.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ template "o11y-otel.fullname" . }}-kube-controller-manager
+  labels:
+    app: {{ template "o11y-otel.name" . }}-kube-controller-manager
+    jobLabel: kube-controller-manager
+{{ include "o11y-otel.labels" . | indent 4 }}
+  namespace: kube-system
+spec:
+  clusterIP: None
+  ports:
+    - name: http-metrics
+      {{- $kubeControllerManagerDefaultInsecurePort := 10252 }}
+      {{- $kubeControllerManagerDefaultSecurePort := 10257 }}
+      port: {{ include "o11y-otel.kubeControllerManager.insecureScrape" (list . $kubeControllerManagerDefaultInsecurePort $kubeControllerManagerDefaultSecurePort .Values.kubeControllerManager.service.port) }}
+      protocol: TCP
+      targetPort: {{ include "o11y-otel.kubeControllerManager.insecureScrape" (list . $kubeControllerManagerDefaultInsecurePort $kubeControllerManagerDefaultSecurePort .Values.kubeControllerManager.service.targetPort) }}
+{{- if .Values.kubeControllerManager.endpoints }}{{- else }}
+  selector:
+    {{- if .Values.kubeControllerManager.service.selector }}
+{{ toYaml .Values.kubeControllerManager.service.selector | indent 4 }}
+    {{- else}}
+    component: kube-controller-manager
+    {{- end}}
+{{- end }}
+  type: ClusterIP
+{{- end }}
