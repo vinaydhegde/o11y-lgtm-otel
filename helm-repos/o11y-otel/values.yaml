@@ -2,9 +2,8 @@ fullnameOverride: ""
 namespaceOverride: ""
 nameOverride: ""
 operatorNamespaceOverride: ""
-clusterName: "sce-sre-cluster"
+clusterName: "unknown"
 useGOMEMLIMIT: true
-
 ## Auto-Instrumentation resource to be installed in the cluster
 ## Can be used by setting the following:
 ##  Java: instrumentation.opentelemetry.io/inject-java: "true"
@@ -13,7 +12,7 @@ useGOMEMLIMIT: true
 ##  DotNet: instrumentation.opentelemetry.io/inject-dotnet: "true"
 ##  OpenTelemetry SDK environment variables only: instrumentation.opentelemetry.io/inject-sdk: "true"
 autoinstrumentation:
-  enabled: true 
+  enabled: false
   ## The collector name to send traces to
   collectorTarget: traces
   propagators:
@@ -46,11 +45,11 @@ collectors: []
 
 ## Default collector for tracing
 tracesCollector:
-  enabled: true 
+  enabled: false
   name: traces
   clusterName: ""
 
-  image: otel/opentelemetry-collector-contrib:0.95.0
+  image: otel/opentelemetry-collector-contrib:0.88.0
   mode: deployment
   replicas: 1
   hpa:
@@ -60,10 +59,10 @@ tracesCollector:
     targetMemoryUtilization: 70
   resources:
     limits:
-      memory: 700Mi
+      memory: 250Mi
     requests:
-      cpu: 350m
-      memory: 700Mi
+      cpu: 250m
+      memory: 250Mi
   config:
     receivers:
       otlp:
@@ -72,23 +71,7 @@ tracesCollector:
             endpoint: "0.0.0.0:4317"
           http:
             endpoint: "0.0.0.0:4318"
-    connectors:
-      spanmetrics:
-        namespace: span.metrics
-      servicegraph:
-        metrics_exporter: prometheusremotewrite/servicegraph      
-        latency_histogram_buckets: [1,2,3,4,5]
-        dimensions:  
-          - dimension-1
-          - dimension-2
-        store:
-          ttl: 1s
-          max_items: 10  
     processors:
-      memory_limiter:
-        check_interval: 5s
-        limit_percentage: 80
-        spike_limit_percentage: 25         
       # We recommend use of the batch processor.  We recommend the settings
       # below for traces.
       #
@@ -112,15 +95,11 @@ tracesCollector:
         timeout: 2s
         override: false
       k8sattributes:
-        passthrough: true 
+        passthrough: false
         pod_association:
           - sources:
               - from: resource_attribute
-                name: k8s.pod.ip
-              - from: resource_attribute
                 name: k8s.pod.name
-              - from: resource_attribute
-                name: k8s.namespace.name                
         extract:
           metadata:
             - k8s.cluster.uid
@@ -143,49 +122,16 @@ tracesCollector:
             - container.image.name
       resource:
         attributes:
-          - pattern: os.*
-            action: delete 
-          - pattern: host.*
-            action: delete
-          - pattern: process.*
-            action: delete
-          - pattern: telemetry.*
-            action: delete
-          - action: insert
-            key: loki.resource.labels
-            value: k8s.namespace.name, k8s.service.name, k8s.node.name, k8s.pod.name, k8s.pod.start_time,k8s.replicaset.name
-      attributes:
-        actions:
-          - action: insert
-            key: loki.attribute.labels
-            value: k8s.pod.start_time, k8s.replicaset.name
-      transform:
-        error_mode: ignore      
-        trace_statements:
-          - context: span                
-            statements:
-              - set(kind, "client") where attributes["kind"] == 0 
-              - set(status.code, STATUS_CODE_OK) where attributes["http.request.status_code"] == 400                
-                #- set(span.kind, "internal")  where kind == 1
-                #- set(span.kind, "server") where kind == 2
-                #- set(span.kind, "client") where kind == 3
-                #- set(span.kind, "producer") where kind == 4
-                #- set(span.kind, "consumer") where kind == 5
-                #- set(span.kind, "nil") where kind == nil          
-      #transform/attributes:
-      #  actions:
-      #    - key: span.kind
-      #      from_attributes:
-      #        - key: span.kind
-      #      action: upsert        
+          - key: otel.helm_chart
+            value: o11y-otel
+            action: insert
 
     exporters:
-      debug:
-        verbosity: detailed 
       otlphttp:
-        endpoint: http://o11y-tempo-distributor:4318
+        endpoint: http://tempo-distributor:4318
       loki:
-        endpoint: http://loki-gateway:80/loki/api/v1/push
+        endpoint: http://loki-gateway:80/loki/api/v1/push      
+
         # Queue settings are required.  It does not make sense to use
         # the exporter without a queue, it has to do with
         # requiring the "num_consumers" limit configured in this
@@ -227,23 +173,8 @@ tracesCollector:
         # While we expect latency under one second, typically, we
         # recommend a longer timeout than the default.
         timeout: 30s
-      prometheusremotewrite:
-        endpoint: http://o11y-mimir-nginx:80/api/v1/push
-        # Note that the exporter doesn't support sending_queue but provides remote_write_queue
-        remote_write_queue:
-          enabled: true
-          # num_consumers - minimum number of workers to use to fan out the outgoing requests (default value is 5)
-          # With the default value, export was failing with error - num_consumers. Hence it is increased to 10 
-          num_consumers: 10
-        retry_on_failure:
-          enabled: true           
 
     service:
-      telemetry:
-        logs: 
-          level: INFO       
-        metrics:
-          address: 0.0.0.0:8888        
       pipelines:
         traces:
           receivers: [otlp]
@@ -251,23 +182,14 @@ tracesCollector:
             - resource
             - resourcedetection/env
             - k8sattributes
-            - memory_limiter
             - batch
-          exporters: [debug, otlphttp, spanmetrics]
-        logs:
-          receivers: [otlp]
-          processors: [k8sattributes, resource, attributes, memory_limiter, batch]
-          exporters: [debug, loki]
-        metrics/spanmetrics:
-          receivers: [spanmetrics]
-          processors: [resource, memory_limiter, batch]
-          exporters: [debug, prometheusremotewrite]
-          
+          exporters: [otlphttp]
+
 ## Default collector for metrics (includes infrastructure metrics)
 metricsCollector:
   name: metrics
   clusterName: ""
-  image: otel/opentelemetry-collector-contrib:0.95.0
+  image: otel/opentelemetry-collector-contrib:0.88.0
   enabled: true
   mode: statefulset
   replicas: 3
@@ -280,24 +202,24 @@ metricsCollector:
     enabled: true
     allocationStrategy: "consistent-hashing"
     replicas: 2
-    image: ghcr.io/open-telemetry/opentelemetry-operator/target-allocator:0.94.0
+    image: ghcr.io/open-telemetry/opentelemetry-operator/target-allocator:0.88.0
     prometheusCR:
       enabled: true
     # Override Default targetAllocator resources
-    resources:
-      limits:
-        memory: 1Gi
-      requests:
-        cpu: 500m
-        memory: 500Mi
+      resources:
+        limits:
+          memory: 1Gi
+        requests:
+          cpu: 500m
+          memory: 50Mi
   # No need for a scrape config when using prometheusCRs
   scrape_configs_file: "scrape_configs.yaml"
   resources:
     limits:
-      memory: 4Gi 
+      memory: 500Mi
     requests:
-      cpu: 1
-      memory: 2Gi
+      cpu: 250m
+      memory: 500Mi
   config:
     extensions:
       health_check:
@@ -312,9 +234,6 @@ metricsCollector:
         protocols:
           grpc:
             endpoint: "0.0.0.0:4317"
-          http:
-            endpoint: "0.0.0.0:4318"
-
     processors:
       metricstransform/k8sservicename:
         transforms:
@@ -334,7 +253,7 @@ metricsCollector:
         pod_association:
           - sources:
               - from: resource_attribute
-                name: k8s.pod.ip
+                name: k8s.pod.name
         extract:
           metadata:
             - k8s.namespace.name
@@ -354,10 +273,6 @@ metricsCollector:
             - k8s.statefulset.uid
             - container.image.tag
             - container.image.name
-      memory_limiter:
-        check_interval: 5s
-        limit_percentage: 80
-        spike_limit_percentage: 25              
       batch:
         send_batch_size: 1000
         timeout: 1s
@@ -372,24 +287,12 @@ metricsCollector:
             action: insert
 
     exporters:
-      debug:
-        verbosity: detailed
       prometheusremotewrite:
-        endpoint: http://o11y-mimir-nginx:80/api/v1/push
-        remote_write_queue:
-          enabled: true
-          num_consumers: 10
-        retry_on_failure:
-          enabled: true        
-
+        endpoint: http://mimir-nginx.local:80/api/v1/push
+        
     service:
       extensions:
         - health_check
-      telemetry:
-        logs:
-          level: "debug" 
-        metrics:
-          address: 0.0.0.0:8888         
       pipelines:
         metrics:
           receivers: [prometheus, otlp]
@@ -398,22 +301,21 @@ metricsCollector:
             - resourcedetection/env
             - k8sattributes
             - metricstransform/k8sservicename
-            - memory_limiter
             - batch
-          exporters: [debug, prometheusremotewrite]
+          exporters: [prometheusremotewrite]
 
 logsCollector:
   name: logs
   clusterName: ""
-  image: otel/opentelemetry-collector-contrib:0.95.0
-  enabled: true
+  image: otel/opentelemetry-collector-contrib:0.88.0
+  enabled: false
   mode: daemonset
   resources:
     limits:
-      memory: 6Gi
+      memory: 250Mi
     requests:
-      cpu: 800m
-      memory: 4Gi
+      cpu: 250m
+      memory: 250Mi
   volumeMounts:
     - mountPath: /var/log
       name: varlog
@@ -432,14 +334,13 @@ logsCollector:
   config:
     receivers:
       k8s_events: {}
+      # inspired by https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/081678933ad0246a0fcb9564c8f1871480a306aa/examples/kubernetes/otel-collector-config.yml
       filelog:
         include:
           - /var/log/pods/*/*/*.log
         start_at: beginning
         include_file_path: true
-        include_file_name: true 
-        include_file_name_resolved: true
-        include_file_path_resolved: true
+        include_file_name: false
         operators:
           # Find out which format is used by kubernetes
           - type: router
@@ -510,10 +411,6 @@ logsCollector:
         detectors: [env]
         timeout: 2s
         override: false
-      memory_limiter:
-        check_interval: 5s
-        limit_percentage: 80
-        spike_limit_percentage: 25        
       batch:
         send_batch_size: 1000
         timeout: 1s
@@ -529,16 +426,10 @@ logsCollector:
                 new_label: k8s.service.name
       k8sattributes:
         passthrough: false
-        filter:
-          node_from_env_var: OTEL_K8S_NODE_NAME        
         pod_association:
           - sources:
               - from: resource_attribute
-                name: k8s.pod.ip
-              - from: resource_attribute
                 name: k8s.pod.name
-              - from: resource_attribute
-                name: k8s.namespace.name                
         extract:
           metadata:
             - k8s.cluster.uid
@@ -564,61 +455,34 @@ logsCollector:
           - key: otel.helm_chart
             value: o11y-otel
             action: insert
-          - action: insert
-            key: loki.resource.labels
-            value: k8s.namespace.name, k8s.service.name, k8s.node.name, k8s.pod.name, k8s.pod.start_time, k8s.replicaset.name  
-      attributes:
-        actions:
-          - action: insert
-            key: loki.attribute.labels
-            value: k8s.pod.start_time, k8s.replicaset.name          
 
     exporters:
-      debug:
-        verbosity: detailed
       loki:
         endpoint: http://loki-gateway:80/loki/api/v1/push
-        sending_queue:
-          enabled: true
-        retry_on_failure:
-          enabled: true        
-      prometheusremotewrite: 
-        endpoint: http://o11y-mimir-nginx:80/api/v1/push
-        remote_write_queue:
-          enabled: true
-          num_consumers: 10
-        retry_on_failure:
-          enabled: true        
+      prometheusremotewrite:
+        endpoint: http://mimir-nginx:80/api/v1/push        
 
     service:
-      telemetry:
-        #logs:      
-        metrics:
-          address: 0.0.0.0:8888
-          level: detailed
       pipelines:
         logs:
-          receivers: [filelog]
+          receivers: [k8s_events, filelog]
           processors:
+            - resource
             - resourcedetection/env
             - k8sattributes
-            - resource
-            - attributes
-            - memory_limiter
             - batch
-          exporters: [debug, loki]
-          #include self-scraped metrics, see `templates/collector.yaml` for `prometheus` receiver definition
+          exporters: [otlp,loki]
+        # include self-scraped metrics, see `templates/collector.yaml` for `prometheus` receiver definition
         metrics:
           receivers: [prometheus]
           processors:
+            - resource
             - resourcedetection/env
             - k8sattributes
             - metricstransform/k8sservicename
-            - resource
-            - attributes
-            - memory_limiter
             - batch
-          exporters: [debug, prometheusremotewrite]          
+          exporters: [otlp]
+
 ## Component scraping the kube api server
 ##
 kubeApiServer:
@@ -673,6 +537,10 @@ kubeApiServer:
     #  foo: bar
 
 ## Component scraping the blackbox exporter endpoints
+blackboxExporter:
+  enabled: true
+  targets: [] 
+
 ## Component scraping the kubelet and kubelet-hosted cAdvisor
 ##
 kubelet:
